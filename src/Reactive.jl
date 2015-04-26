@@ -5,7 +5,7 @@ using Base.Order
 using Base.Collections
 
 export SignalSource, Signal, Input, Node, signal, value, lift, @lift, map, foldl,
-       foldr, merge, filter, dropif, droprepeats, dropwhen,
+       flatten, switch, foldr, merge, filter, dropif, droprepeats, dropwhen,
        sampleon, prev, keepwhen, ⟿
 
 import Base: eltype, join_eltype, convert, push!, merge, map, show, writemime, filter
@@ -68,6 +68,14 @@ function add_child!(parents::@compat(Tuple{Vararg{Signal}}), child::Signal)
     end
 end
 add_child!(parent::Signal, child::Signal) = push!(parent.children, child)
+
+function remove_child!(parents::(Signal...), child::Signal)
+    for p in parents
+        p.children = p.children[find(p.children .!= child)]
+    end
+end
+remove_child!(parent::Signal, child::Signal) =
+    remove_child!((parent,), child)
 
 type Lift{T} <: Node{T}
     rank::Uint
@@ -203,6 +211,33 @@ function update(node::SampleOn, parent)
     return true
 end
 
+deepvalue(s::Signal) = value(s)
+deepvalue{T <: Signal}(s::Signal{T}) = deepvalue(value(s))
+
+type Flatten{T} <: Node{T}
+    rank::Uint
+    children::Vector{Signal}
+    value::T
+    function Flatten(signalsignal::Signal)
+        node = new(next_rank(), Signal[], deepvalue(signalsignal))
+
+        firstsig = value(signalsignal)
+        add_child!(signalsignal, node)
+        foldl(begin add_child!(firstsig, node); firstsig end, signalsignal; output_type=Any) do prev, next
+            remove_child!(prev, node)
+            add_child!(next, node)
+            next
+        end
+
+        return node
+    end
+end
+
+function update(node::Flatten, parent)
+    node.value = deepvalue(parent)
+    return true
+end
+
 begin
     local isupdating = false
     # Update the value of an Input signal and propagate the
@@ -265,12 +300,14 @@ begin
                 end
                 isupdating = false
                 return nothing
-            catch e
+            catch ex
                 # FIXME: Rethink this.
                 isupdating = false
+                showerror(STDERR, ex)
+                println(STDERR)
                 Base.show_backtrace(STDERR, catch_backtrace())
-                println(STDERR, "\n")
-                throw(e)
+                println(STDERR)
+                throw(ex)
             end
         end
     end
@@ -387,10 +424,32 @@ function show{T}(io::IO, node::Signal{T})
     write(io, string("[$(typeof(node))] ", node.value))
 end
 
+#
+# Flatten a signal of signal into a signal
+#
+# Args:
+#    ss: the signal of signals
+# Returns:
+#    A signal
+#
+flatten(ss::Signal; typ=eltype(value(ss))) =
+    Flatten{typ}(ss)
+
+#
+# `switch(f, switcher)` is the same as `flatten(lift(f, switcher))`
+#
+# Args:
+#    f: A function from `T` to `Signal`
+#    switcher: A signal of type `T`
+# Returns:
+#    A flattened signal
+#
+switch(f, switcher) =
+    lift(f, switcher) |> flatten
+
 function writemime{T}(io::IO, m::MIME"text/plain", node::Signal{T})
     writemime(io, m, node.value)
 end
-
 
 include("macros.jl")
 include("timing.jl")
